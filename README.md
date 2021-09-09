@@ -61,6 +61,20 @@ The final model should look like this:
 
 ![mouse model triplanar](https://raw.githubusercontent.com/carlohamalainen/volgenmodel-fast-example/master/model-2016-01-09.png)
 
+It's possible to apply the estimated flow fields to other images that where aligned with the original scans. Here is one example how this can be done (atlas was estimated on Magnitude data and applied to QSM data):
+```
+./new_data_to_atlas_space.py \
+    --name "QSM template" \
+    --xfm_dir "data/magnitude_template/workflow/xfmconcat_9" \
+    --xfm_pattern "*/*.xfm" \
+    --source_dir "data/qsm/qsm_final/mnc" \
+    --source_pattern "*.mnc" \
+    --atlas_dir "data/magnitude_template/workflow/voliso_9" \
+    --atlas_pattern "*.mnc" \
+    --work_dir "data/qsm_template/work" \
+    --out_dir "data/qsm_template/out" 
+```
+
 # Citation
 This method is an implementation of the technique described in this paper:
 
