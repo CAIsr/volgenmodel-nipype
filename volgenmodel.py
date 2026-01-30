@@ -330,8 +330,12 @@ def make_workflow(args, opt, conf):
                                     interface=preprocess_volpad_id,
                                     name='preprocess_volpad',
                                     iterfield=['input_file'])
-        preprocess_volpad.plugin_args = {'qsub_args': '-A UQ-CAI -l nodes=1:ppn=10,mem=10gb,vmem=10gb,walltime=04:10:00',
-                                      'overwrite': True}
+        if args.run == 'PBSGraph':
+            preprocess_volpad.plugin_args = {'qsub_args': '-A UQ-CAI -l nodes=1:ppn=10,mem=10gb,vmem=10gb,walltime=04:10:00',
+                                          'overwrite': True}
+        if args.run == 'SLURMGraph':
+            preprocess_volpad.plugin_args = {'sbatch_args': '--time=04:10:00 --mem=10G --cpus-per-task=10',
+                                          'overwrite': True}
 
     workflow.connect(preprocess_normalise, 'output_file', preprocess_volpad, 'input_file')
     # </editor-fold>
@@ -598,6 +602,9 @@ def make_workflow(args, opt, conf):
             if args.run == 'PBSGraph':
                 nlpfit.plugin_args = {'qsub_args': '-A UQ-CAI -l nodes=1:ppn=1,mem=10gb,vmem=10gb,walltime=04:10:00',
                                       'overwrite': True}
+            if args.run == 'SLURMGraph':
+                nlpfit.plugin_args = {'sbatch_args': '--time=04:10:00 --mem=10G --cpus-per-task=1',
+                                      'overwrite': True}
 
             workflow.connect(write_conf, 'conf_fname', nlpfit, 'config_file')
 
@@ -834,10 +841,10 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--name', type=str, default='workflow',
                         help='The workflow name')
-    parser.add_argument('--run', type=str, default='MultiProc', choices=['MultiProc', 'PBSGraph'],
+    parser.add_argument('--run', type=str, default='MultiProc', choices=['MultiProc', 'PBSGraph', 'SLURMGraph'],
                         help='The execution plugin to use')
-    #parser.add_argument('--ncpus', type=int, default=1,
-    #                    help='The amount of CPUs used in MultiProc mode')
+    parser.add_argument('--ncpus', type=int, default=1,
+                        help='The amount of CPUs used in MultiProc mode')
     parser.add_argument('--input_dir', type=str, default='../fast-example',
                         help='The input directory')
     parser.add_argument('--input_pattern', type=str, default='*mouse*.mnc',
@@ -868,6 +875,18 @@ if __name__ == '__main__':
                         help='resample image to be isometric')
     parser.add_argument('--fit_stages', type=str, default='lin,0,1,2,3,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11',
                         help='fit stages to be run')
+
+    # SLURM-specific arguments
+    parser.add_argument('--slurm_partition', type=str, default='normal',
+                        help='SLURM partition/queue name')
+    parser.add_argument('--slurm_account', type=str, default=None,
+                        help='SLURM account for job submission')
+    parser.add_argument('--slurm_time', type=str, default='04:00:00',
+                        help='SLURM walltime limit (HH:MM:SS)')
+    parser.add_argument('--slurm_mem', type=str, default='10G',
+                        help='SLURM memory per job (e.g., 10G, 4000M)')
+    parser.add_argument('--slurm_cpus_per_task', type=int, default=1,
+                        help='SLURM CPUs per task')
 
     cli_args, unparsed = parser.parse_known_args()
 
@@ -931,6 +950,23 @@ if __name__ == '__main__':
                 'qsub_args': '-A UQ-CAI -l nodes=1:ppn=1,mem=1gb,vmem=1gb,walltime=00:10:00',
                 #'max_jobs': '10',
                 'dont_resubmit_completed_jobs': True
+            }
+        )
+
+    if cli_args.run == 'SLURMGraph':
+        # Build sbatch_args from CLI parameters
+        sbatch_args = f'--time={cli_args.slurm_time} --mem={cli_args.slurm_mem} --cpus-per-task={cli_args.slurm_cpus_per_task}'
+        if cli_args.slurm_partition:
+            sbatch_args += f' --partition={cli_args.slurm_partition}'
+        if cli_args.slurm_account:
+            sbatch_args += f' --account={cli_args.slurm_account}'
+
+        wf.run(
+            plugin='SLURMGraph',
+            plugin_args={
+                'sbatch_args': sbatch_args,
+                'dont_resubmit_completed_jobs': True,
+                'dont_wait': True
             }
         )
 
