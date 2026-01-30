@@ -43,6 +43,73 @@ import pickle
 import gzip
 
 
+def get_cgroup_memory_limit_gb():
+    """
+    Detect the memory limit set by cgroups (v1 or v2).
+    Returns the memory limit in GB, or None if not available/unlimited.
+    """
+    import os
+
+    # Try cgroups v2 first
+    cgroup_v2_path = '/sys/fs/cgroup/memory.max'
+    # Try cgroups v1
+    cgroup_v1_path = '/sys/fs/cgroup/memory/memory.limit_in_bytes'
+
+    memory_bytes = None
+
+    try:
+        if os.path.exists(cgroup_v2_path):
+            with open(cgroup_v2_path, 'r') as f:
+                value = f.read().strip()
+                if value != 'max':  # 'max' means unlimited
+                    memory_bytes = int(value)
+        elif os.path.exists(cgroup_v1_path):
+            with open(cgroup_v1_path, 'r') as f:
+                value = int(f.read().strip())
+                # Check if it's effectively unlimited (very large value close to max int)
+                if value < 9223372036854771712:  # Common "unlimited" value
+                    memory_bytes = value
+    except (IOError, ValueError, PermissionError):
+        pass
+
+    if memory_bytes is not None:
+        # Convert bytes to GB, leave some headroom (use 90% of limit)
+        return int(memory_bytes / (1024 ** 3) * 0.9)
+
+    return None
+
+
+def get_available_memory_gb(default=80):
+    """
+    Get available memory in GB, checking in order:
+    1. Cgroups limit (for containers/HPC jobs)
+    2. System total memory
+    3. Fallback to default
+    """
+    # First try cgroups
+    cgroup_mem = get_cgroup_memory_limit_gb()
+    if cgroup_mem is not None:
+        print(f"+++ Detected cgroups memory limit: {cgroup_mem} GB (with 10% headroom)")
+        return cgroup_mem
+
+    # Fall back to system memory
+    try:
+        import os
+        if hasattr(os, 'sysconf'):
+            pages = os.sysconf('SC_PHYS_PAGES')
+            page_size = os.sysconf('SC_PAGE_SIZE')
+            if pages > 0 and page_size > 0:
+                total_bytes = pages * page_size
+                total_gb = int(total_bytes / (1024 ** 3) * 0.9)  # 90% of total
+                print(f"+++ Using system memory: {total_gb} GB (with 10% headroom)")
+                return total_gb
+    except (ValueError, OSError):
+        pass
+
+    print(f"+++ Using default memory limit: {default} GB")
+    return default
+
+
 # <editor-fold desc="Functions">
 def identity_file(input_file):
     # Adapted from: http://nipy.org/nipype/users/function_interface.html
@@ -887,6 +954,8 @@ if __name__ == '__main__':
                         help='SLURM memory per job (e.g., 10G, 4000M)')
     parser.add_argument('--slurm_cpus_per_task', type=int, default=1,
                         help='SLURM CPUs per task')
+    parser.add_argument('--memory_gb', type=int, default=None,
+                        help='Memory limit in GB for MultiProc mode (auto-detected from cgroups if not specified)')
 
     cli_args, unparsed = parser.parse_known_args()
 
@@ -936,11 +1005,18 @@ if __name__ == '__main__':
     os.makedirs(os.path.abspath(args.output_dir), exist_ok=True)
 
     if cli_args.run == 'MultiProc':
+        # Determine memory limit: CLI arg > cgroups > system memory > default
+        if cli_args.memory_gb is not None:
+            memory_gb = cli_args.memory_gb
+            print(f"+++ Using user-specified memory limit: {memory_gb} GB")
+        else:
+            memory_gb = get_available_memory_gb(default=80)
+
         wf.run(
             plugin='MultiProc',
             plugin_args={
                 'n_procs': int(os.environ["NCPUS"]) if "NCPUS" in os.environ else int(os.cpu_count()), #cli_args.ncpus,
-                'memory_gb': 80,
+                'memory_gb': memory_gb,
             }
         )
     if cli_args.run == 'PBSGraph':
