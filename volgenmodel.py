@@ -961,6 +961,10 @@ if __name__ == '__main__':
         if cli_args.slurm_account:
             sbatch_args += f' --account={cli_args.slurm_account}'
 
+        # Add PYTHONPATH so SLURM workers can import volgenmodel module
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        sbatch_args += f' --export=ALL,PYTHONPATH="{script_dir}:$PYTHONPATH"'
+
         wf.run(
             plugin='SLURMGraph',
             plugin_args={
