@@ -268,8 +268,9 @@ def make_workflow(args, opt, conf):
     # datasource.inputs.run = [args.input_pattern_run]
     # datasource.inputs.subject = [args.input_pattern_subject]
 
-    results = datasource.run()
-    print(results.outputs)
+    # Note: Do NOT call datasource.run() here - it would execute outside the workflow
+    # context and store results in /tmp, which causes FileNotFoundError on SLURM nodes.
+    # The datasource will run properly when the workflow executes.
 
     datasink = pe.Node(interface=nio.DataSink(), name="datasink")
     datasink.inputs.base_directory = os.path.abspath(
