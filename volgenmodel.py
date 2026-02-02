@@ -362,6 +362,55 @@ def identity_file(input_file):
     return os.path.abspath(output_file)
 
 
+def _is_nifti_file(input_file):
+    """
+    Check if a file is a NIfTI file based on its extension.
+    Returns True for .nii and .nii.gz files.
+    """
+    import os
+    lower_file = input_file.lower()
+    return lower_file.endswith('.nii') or lower_file.endswith('.nii.gz')
+
+
+def _convert_nii_to_mnc(input_file):
+    """
+    Convert a NIfTI file to MINC format using nii2mnc.
+    If the file is already MINC, return it as-is.
+    """
+    import os
+    import subprocess
+    
+    lower_file = input_file.lower()
+    
+    # Check if it's a NIfTI file
+    if lower_file.endswith('.nii.gz'):
+        output_file = os.path.basename(input_file)[:-7] + '.mnc'
+    elif lower_file.endswith('.nii'):
+        output_file = os.path.basename(input_file)[:-4] + '.mnc'
+    else:
+        # Not a NIfTI file, return as-is (assume it's already MINC)
+        return input_file
+    
+    output_path = os.path.abspath(output_file)
+    
+    # Run nii2mnc conversion
+    cmd = ['nii2mnc', '-float', '-clobber', input_file, output_path]
+    print(f"+++ Converting NIfTI to MINC: {input_file} -> {output_path}")
+    
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    
+    if result.returncode != 0:
+        raise RuntimeError(f"nii2mnc conversion failed: {result.stderr}")
+    
+    return output_path
+
+
+convert_nii_to_mnc = utils.Function(
+                            input_names=['input_file'],
+                            output_names=['output_file'],
+                            function=_convert_nii_to_mnc)
+
+
 def load_pklz(f):
     return pickle.load(gzip.open(f))
 
@@ -571,6 +620,17 @@ def make_workflow(args, opt, conf):
     #workflow.connect(datasource, 'outfiles', renameFiles, 'in_file')  
     # </editor-fold>
 
+    # <editor-fold desc="convert NIfTI to MINC if needed">
+    # Check if input files might be NIfTI format and convert them to MINC
+    # This handles .nii and .nii.gz files automatically
+    nii_to_mnc_converter = pe.MapNode(
+                    interface=deepcopy(convert_nii_to_mnc),
+                    name='nii_to_mnc_converter',
+                    iterfield=['input_file'])
+    
+    workflow.connect(datasource, 'outfiles', nii_to_mnc_converter, 'input_file')
+    # </editor-fold>
+
     # <editor-fold desc="do pre-processing nad normalise">
     preprocess_volcentre = pe.MapNode(
                     interface=Volcentre(zero_dircos=True),
@@ -578,7 +638,7 @@ def make_workflow(args, opt, conf):
                     iterfield=['input_file'])
 
     #workflow.connect(renameFiles, 'out_file', preprocess_volcentre, 'input_file')
-    workflow.connect( datasource, 'outfiles', preprocess_volcentre, 'input_file')
+    workflow.connect(nii_to_mnc_converter, 'output_file', preprocess_volcentre, 'input_file')
 
     if opt['normalise']:
         preprocess_threshold_blur = pe.MapNode(
