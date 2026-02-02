@@ -38,3 +38,4 @@ docker/volgenmodel-fast-example/*
 /.idea
 
 workflow_*
+debug.sh

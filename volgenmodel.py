@@ -11,7 +11,9 @@
 import os
 import os.path
 import subprocess
+import json
 import nipype.pipeline.engine as pe
+from nipype import config as nipype_config
 import nipype.interfaces.io as nio
 import nipype.interfaces.utility as utils
 from copy import deepcopy
@@ -108,6 +110,81 @@ def get_available_memory_gb(default=80):
 
     print(f"+++ Using default memory limit: {default} GB")
     return default
+
+
+def analyze_resource_reports(work_dir):
+    """
+    Parse Nipype resource reports and summarize memory usage per node.
+    Requires resource monitoring to be enabled before workflow execution.
+    """
+    import glob
+    import json
+    
+    results = []
+    
+    # Find all report.json files in the work directory
+    for report_file in glob.glob(f'{work_dir}/**/result_*.pklz', recursive=True):
+        # Resource reports are stored alongside result files
+        report_dir = os.path.dirname(report_file)
+        resource_file = os.path.join(report_dir, '_report', 'report.json')
+        
+        if os.path.exists(resource_file):
+            try:
+                with open(resource_file) as f:
+                    data = json.load(f)
+                
+                # Extract node name from path
+                node_name = os.path.basename(report_dir)
+                
+                results.append({
+                    'node': node_name,
+                    'memory_gb': data.get('runtime_memory_gb', 0),
+                    'peak_memory_gb': data.get('peak_memory_gb', data.get('runtime_memory_gb', 0)),
+                    'runtime_sec': data.get('runtime_seconds', 0),
+                    'cpu_percent': data.get('cpu_percent', 0),
+                })
+            except (json.JSONDecodeError, KeyError, IOError) as e:
+                print(f"Warning: Could not parse {resource_file}: {e}")
+                continue
+    
+    if not results:
+        print("\n=== No Resource Reports Found ===")
+        print("Make sure --profile was enabled and the workflow completed.")
+        print(f"Searched in: {work_dir}")
+        return []
+    
+    # Sort by memory usage (highest first)
+    results.sort(key=lambda x: x['memory_gb'], reverse=True)
+    
+    print("\n" + "=" * 80)
+    print("RESOURCE USAGE SUMMARY (sorted by memory, highest first)")
+    print("=" * 80)
+    print(f"{'Node':<50} {'Memory (GB)':>12} {'Runtime (s)':>12}")
+    print("-" * 80)
+    
+    total_memory_max = 0
+    total_runtime = 0
+    
+    for r in results:
+        print(f"{r['node']:<50} {r['memory_gb']:>12.2f} {r['runtime_sec']:>12.1f}")
+        total_memory_max = max(total_memory_max, r['memory_gb'])
+        total_runtime += r['runtime_sec']
+    
+    print("-" * 80)
+    print(f"{'PEAK MEMORY ACROSS ALL NODES:':<50} {total_memory_max:>12.2f} GB")
+    print(f"{'TOTAL RUNTIME (sequential):':<50} {total_runtime:>12.1f} sec")
+    print("=" * 80)
+    
+    # Provide recommendations
+    print("\n=== RECOMMENDATIONS ===")
+    print(f"Set --memory_gb to at least {int(total_memory_max * 1.2)} GB (peak + 20% headroom)")
+    print("\nTo set mem_gb on individual nodes, add lines like:")
+    for r in results[:5]:  # Top 5 memory consumers
+        if r['memory_gb'] > 1:
+            print(f"    {r['node']}.mem_gb = {r['memory_gb']:.1f}")
+    print("=" * 80 + "\n")
+    
+    return results
 
 
 # <editor-fold desc="Functions">
@@ -957,6 +1034,8 @@ if __name__ == '__main__':
                         help='SLURM CPUs per task')
     parser.add_argument('--memory_gb', type=int, default=None,
                         help='Memory limit in GB for MultiProc mode (auto-detected from cgroups if not specified)')
+    parser.add_argument('--profile', action='store_true', default=False,
+                        help='Enable resource monitoring to profile memory/CPU usage per node')
 
     cli_args, unparsed = parser.parse_known_args()
 
@@ -987,6 +1066,11 @@ if __name__ == '__main__':
     options['clean'] = 0
     options['keep_tmp'] = 0
 
+    # Enable resource monitoring if --profile flag is set
+    if cli_args.profile:
+        print("+++ Resource monitoring ENABLED - will profile memory/CPU usage per node")
+        nipype_config.enable_resource_monitor()
+    
     configuration = [{str('step'): 32, str('blur_fwhm'): 16, str('iterations'): 20},        # 0
                      {str('step'): 16, str('blur_fwhm'): 8, str('iterations'): 20},         # 1
                      {str('step'): 12, str('blur_fwhm'): 6, str('iterations'): 20},         # 2
@@ -1051,4 +1135,9 @@ if __name__ == '__main__':
             }
         )
 
+    # Print resource usage summary if profiling was enabled
+    if cli_args.profile:
+        print("\n+++ Analyzing resource usage...")
+        analyze_resource_reports(os.path.abspath(args.work_dir))
+    
     print('done')
