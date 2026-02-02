@@ -1,6 +1,17 @@
 # volgenmodel-nipype
 volgenmodel-nipype is the port of [volgenmodel](https://github.com/andrewjanke/volgenmodel) to [Nipype](https://github.com/nipy/nipype). It creates nonlinear models from a series of input MINC files.
 
+## Use Volgenmodel inside a Neurodesk.org environment
+```bash
+git clone https://github.com/CAIsr/volgenmodel-nipype.git
+git clone https://github.com/CAIsr/volgenmodel-fast-example.git 
+python3 volgenmodel-nipype/volgenmodel.py --input_dir volgenmodel-fast-example
+```
+
+## Use Volgenmodel as a docker container
+this project maintains a container with everything setup and configured: https://github.com/SaibotMagd/volgenmodel-docker
+
+
 ## Install for Windows Subsystem for Linux or Ubuntu 16.04
 Install minc: https://bic-mni.github.io
 ```bash
