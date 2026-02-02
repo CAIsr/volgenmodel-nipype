@@ -5,6 +5,7 @@ volgenmodel-nipype is the port of [volgenmodel](https://github.com/andrewjanke/v
 ```bash
 git clone https://github.com/CAIsr/volgenmodel-nipype.git
 git clone https://github.com/CAIsr/volgenmodel-fast-example.git 
+ml minc
 python3 volgenmodel-nipype/volgenmodel.py --input_dir volgenmodel-fast-example
 ```
 
