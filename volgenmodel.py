@@ -103,6 +103,110 @@ def check_minc_on_path():
     sys.exit(1)
 
 
+def get_slurm_cpu_count():
+    """
+    Detect the CPU count allocated by SLURM.
+    Checks SLURM environment variables in order of preference.
+    Returns the CPU count, or None if not running under SLURM.
+    """
+    import os
+    
+    # Check various SLURM environment variables for CPU allocation
+    # SLURM_CPUS_PER_TASK: CPUs allocated per task (set with --cpus-per-task)
+    # SLURM_JOB_CPUS_PER_NODE: CPUs allocated per node for the job
+    # SLURM_CPUS_ON_NODE: Number of CPUs on the allocated node(s)
+    
+    for var in ['SLURM_CPUS_PER_TASK', 'SLURM_JOB_CPUS_PER_NODE', 'SLURM_CPUS_ON_NODE']:
+        value = os.environ.get(var)
+        if value:
+            try:
+                # SLURM_JOB_CPUS_PER_NODE can have format like "8(x2)" for 2 nodes with 8 CPUs each
+                # We just take the first number
+                cpu_count = int(value.split('(')[0])
+                print(f"+++ Detected SLURM CPU allocation: {cpu_count} CPUs (from {var})")
+                return cpu_count
+            except (ValueError, IndexError):
+                continue
+    
+    return None
+
+
+def get_available_cpus(default=None):
+    """
+    Get available CPU count, checking in order:
+    1. SLURM environment variables
+    2. PBS/Torque NCPUS environment variable
+    3. Cgroups CPU quota
+    4. System CPU count
+    5. Fallback to default (if provided) or system count
+    """
+    import os
+    
+    # First try SLURM
+    slurm_cpus = get_slurm_cpu_count()
+    if slurm_cpus is not None:
+        return slurm_cpus
+    
+    # Try PBS/Torque NCPUS
+    ncpus = os.environ.get('NCPUS')
+    if ncpus:
+        try:
+            cpu_count = int(ncpus)
+            print(f"+++ Detected PBS CPU allocation: {cpu_count} CPUs (from NCPUS)")
+            return cpu_count
+        except ValueError:
+            pass
+    
+    # Try cgroups CPU quota (for containers/cgroups v2)
+    cgroup_cpus = get_cgroup_cpu_quota()
+    if cgroup_cpus is not None:
+        return cgroup_cpus
+    
+    # Fall back to system CPU count
+    system_cpus = os.cpu_count() or 1
+    print(f"+++ Using system CPU count: {system_cpus}")
+    return default if default is not None else system_cpus
+
+
+def get_cgroup_cpu_quota():
+    """
+    Detect the CPU quota set by cgroups (v1 or v2).
+    Returns the effective number of CPUs, or None if not available/unlimited.
+    """
+    import os
+    
+    # Try cgroups v2 first
+    cgroup_v2_max = '/sys/fs/cgroup/cpu.max'
+    # Try cgroups v1
+    cgroup_v1_quota = '/sys/fs/cgroup/cpu/cpu.cfs_quota_us'
+    cgroup_v1_period = '/sys/fs/cgroup/cpu/cpu.cfs_period_us'
+    
+    try:
+        if os.path.exists(cgroup_v2_max):
+            with open(cgroup_v2_max, 'r') as f:
+                value = f.read().strip()
+                parts = value.split()
+                if len(parts) >= 2 and parts[0] != 'max':
+                    quota = int(parts[0])
+                    period = int(parts[1])
+                    cpu_count = max(1, quota // period)
+                    print(f"+++ Detected cgroups v2 CPU quota: {cpu_count} CPUs")
+                    return cpu_count
+        elif os.path.exists(cgroup_v1_quota) and os.path.exists(cgroup_v1_period):
+            with open(cgroup_v1_quota, 'r') as f:
+                quota = int(f.read().strip())
+            if quota > 0:  # -1 means unlimited
+                with open(cgroup_v1_period, 'r') as f:
+                    period = int(f.read().strip())
+                cpu_count = max(1, quota // period)
+                print(f"+++ Detected cgroups v1 CPU quota: {cpu_count} CPUs")
+                return cpu_count
+    except (IOError, ValueError, PermissionError):
+        pass
+    
+    return None
+
+
 def get_cgroup_memory_limit_gb():
     """
     Detect the memory limit set by cgroups (v1 or v2).
@@ -1158,10 +1262,17 @@ if __name__ == '__main__':
         else:
             memory_gb = get_available_memory_gb(default=80)
 
+        # Determine CPU count: CLI arg > SLURM > PBS > cgroups > system count
+        if cli_args.ncpus != 1:  # User explicitly set --ncpus
+            n_procs = cli_args.ncpus
+            print(f"+++ Using user-specified CPU count: {n_procs}")
+        else:
+            n_procs = get_available_cpus()
+
         wf.run(
             plugin='MultiProc',
             plugin_args={
-                'n_procs': int(os.environ["NCPUS"]) if "NCPUS" in os.environ else int(os.cpu_count()), #cli_args.ncpus,
+                'n_procs': n_procs,
                 'memory_gb': memory_gb,
             }
         )
