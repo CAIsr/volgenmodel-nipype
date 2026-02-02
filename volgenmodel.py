@@ -43,6 +43,64 @@ import glob
 
 import pickle
 import gzip
+import shutil
+
+
+def check_minc_on_path():
+    """
+    Check if MINC tools are available on the PATH.
+    If not, try to load them via 'ml minc' (module load).
+    Returns True if MINC is available, exits with error otherwise.
+    """
+    # Check if mincinfo (a basic MINC tool) is on the PATH
+    if shutil.which('mincinfo') is not None:
+        print("+++ MINC tools found on PATH")
+        return True
+    
+    print("+++ MINC tools not found on PATH, attempting to load via 'ml minc'...")
+    
+    try:
+        # Try to load the minc module
+        result = subprocess.run(
+            ['bash', '-c', 'source /etc/profile.d/modules.sh 2>/dev/null || true; ml minc && which mincinfo'],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        if result.returncode == 0:
+            # Module loaded successfully, now we need to update the current environment
+            # Get the updated PATH from loading the module
+            env_result = subprocess.run(
+                ['bash', '-c', 'source /etc/profile.d/modules.sh 2>/dev/null || true; ml minc && echo $PATH'],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if env_result.returncode == 0:
+                new_path = env_result.stdout.strip()
+                os.environ['PATH'] = new_path
+                print(f"+++ Successfully loaded MINC module, updated PATH")
+                
+                # Verify mincinfo is now available
+                if shutil.which('mincinfo') is not None:
+                    print("+++ MINC tools now available on PATH")
+                    return True
+        
+        # If we get here, module load didn't work as expected
+        print("!!! Failed to load MINC module via 'ml minc'")
+        print(f"!!! stdout: {result.stdout}")
+        print(f"!!! stderr: {result.stderr}")
+        
+    except subprocess.TimeoutExpired:
+        print("!!! Timeout while trying to load MINC module")
+    except Exception as e:
+        print(f"!!! Error while trying to load MINC module: {e}")
+    
+    print("!!! MINC tools are required but not available.")
+    print("!!! Please ensure MINC is installed and on your PATH, or that 'ml minc' works on your system.")
+    sys.exit(1)
 
 
 def get_cgroup_memory_limit_gb():
@@ -983,6 +1041,9 @@ def make_workflow(args, opt, conf):
 
 
 if __name__ == '__main__':
+    # Check that MINC tools are available before doing anything else
+    check_minc_on_path()
+    
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--name', type=str, default='workflow',
                         help='The workflow name')
