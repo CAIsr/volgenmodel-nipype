@@ -411,6 +411,42 @@ convert_nii_to_mnc = utils.Function(
                             function=_convert_nii_to_mnc)
 
 
+def _convert_mnc_to_nii(input_file):
+    """
+    Convert a MINC file to NIfTI format using mnc2nii.
+    This is used as a post-processing step to output NIfTI files.
+    """
+    import os
+    import subprocess
+    
+    lower_file = input_file.lower()
+    
+    # Check if it's a MINC file
+    if not lower_file.endswith('.mnc'):
+        # Not a MINC file, return as-is
+        return input_file
+    
+    output_file = os.path.basename(input_file)[:-4] + '.nii'
+    output_path = os.path.abspath(output_file)
+    
+    # Run mnc2nii conversion
+    cmd = ['mnc2nii', input_file, output_path]
+    print(f"+++ Converting MINC to NIfTI: {input_file} -> {output_path}")
+    
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    
+    if result.returncode != 0:
+        raise RuntimeError(f"mnc2nii conversion failed: {result.stderr}")
+    
+    return output_path
+
+
+convert_mnc_to_nii = utils.Function(
+                            input_names=['input_file'],
+                            output_names=['output_file'],
+                            function=_convert_mnc_to_nii)
+
+
 def load_pklz(f):
     return pickle.load(gzip.open(f))
 
@@ -1198,6 +1234,26 @@ def make_workflow(args, opt, conf):
                 else:
                     # do_cmd('cp -f %s %s' % (istdfile, opt['output_stdev'],))
                     workflow.connect(bigaverage, 'sd_file', datasink, 'stdev') # we ignore opt['output_stdev']
+            
+            # Post-processing: convert final model and stdev to NIfTI if requested
+            if opt['output_nifti']:
+                # Convert final model to NIfTI
+                model_to_nifti = pe.Node(
+                                        interface=deepcopy(convert_mnc_to_nii),
+                                        name='model_to_nifti_' + snum_txt)
+                workflow.connect(stage_model, 'output_file', model_to_nifti, 'input_file')
+                workflow.connect(model_to_nifti, 'output_file', datasink, 'model_nifti')
+                
+                # Convert stdev to NIfTI if it exists
+                if opt['output_stdev'] is not None:
+                    stdev_to_nifti = pe.Node(
+                                            interface=deepcopy(convert_mnc_to_nii),
+                                            name='stdev_to_nifti_' + snum_txt)
+                    if opt['symmetric']:
+                        workflow.connect(volsymm_final_model, 'output_file', stdev_to_nifti, 'input_file')
+                    else:
+                        workflow.connect(bigaverage, 'sd_file', stdev_to_nifti, 'input_file')
+                    workflow.connect(stdev_to_nifti, 'output_file', datasink, 'stdev_nifti')
         cmodel = stage_model
         # </editor-fold>
 
@@ -1245,6 +1301,8 @@ if __name__ == '__main__':
                         help='resample image to be isometric')
     parser.add_argument('--fit_stages', type=str, default='lin,0,1,2,3,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11',
                         help='fit stages to be run')
+    parser.add_argument('--output_nifti', type=bool, default=1, choices=[0, 1],
+                        help='Convert final model and stdev outputs to NIfTI format (post-processing)')
 
     # SLURM-specific arguments
     parser.add_argument('--slurm_partition', type=str, default='normal',
@@ -1284,6 +1342,7 @@ if __name__ == '__main__':
     options['fit_stages'] = cli_args.fit_stages
     options['output_model'] = 'model.mnc'
     options['output_stdev'] = 'stdev.mnc'
+    options['output_nifti'] = cli_args.output_nifti
     # opt['workdir'] = '/scratch/volgenmodel-fast-example/work'
     options['verbose'] = 1
     options['clobber'] = 1
