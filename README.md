@@ -9,7 +9,7 @@ python3 volgenmodel-nipype/volgenmodel.py --input_dir volgenmodel-fast-example
 ```
 
 ## Use Volgenmodel as a docker container
-this project maintains a container with everything setup and configured: https://github.com/SaibotMagd/volgenmodel-docker
+this project maintains a docker container with volgenmodel and minc setup and configured: https://github.com/SaibotMagd/volgenmodel-docker
 
 
 ## Install for Windows Subsystem for Linux or Ubuntu 16.04
