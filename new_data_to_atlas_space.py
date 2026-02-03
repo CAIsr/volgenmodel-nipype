@@ -99,7 +99,8 @@ def create_workflow(
 
     resample = MapNode(
         interface=Resample(
-            sinc_interpolation=True
+            sinc_interpolation=True,
+            invert_transformation=True  # Transform is native->atlas, but resample needs atlas->native
         ),
         name='resample_',
         iterfield=['input_file', 'transformation']
