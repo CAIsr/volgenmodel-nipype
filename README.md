@@ -126,6 +126,20 @@ It's possible to apply the estimated flow fields to other images that where alig
     --out_dir "data/qsm_template/out" 
 ```
 
+or another example:
+```
+python3 volgenmodel-nipype/new_data_to_atlas_space.py \
+    --name "TOF" \
+    --xfm_dir "workflow_temp_T1MultiProc1/xfmconcat_06_/mapflow" \
+    --xfm_pattern "*/*.xfm" \
+    --source_dir "input_data/" \
+    --source_pattern "*T1_HighRes.mnc" \
+    --atlas_dir "workflow_temp_T1MultiProc1/voliso_06_" \
+    --atlas_pattern "*.mnc" \
+    --work_dir "work_TOF" \
+    --out_dir "TOF_template" 
+```
+
 # Citation
 This method is an implementation of the technique described in this paper:
 

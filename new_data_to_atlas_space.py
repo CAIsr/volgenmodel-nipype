@@ -25,30 +25,42 @@ def create_workflow(
 
     datasource_source = Node(
         interface=DataGrabber(
+            infields=[],
+            outfields=['outfiles'],
             sort_filelist=True
         ),
         name='datasource_source'
     )
     datasource_source.inputs.base_directory = os.path.abspath(source_dir)
-    datasource_source.inputs.template = source_pattern
+    datasource_source.inputs.template = '*'
+    datasource_source.inputs.field_template = {'outfiles': source_pattern}
+    datasource_source.inputs.template_args = {'outfiles': [[]]}
 
     datasource_xfm = Node(
         interface=DataGrabber(
+            infields=[],
+            outfields=['outfiles'],
             sort_filelist=True
         ),
         name='datasource_xfm'
     )
     datasource_xfm.inputs.base_directory = os.path.abspath(xfm_dir)
-    datasource_xfm.inputs.template = xfm_pattern
+    datasource_xfm.inputs.template = '*'
+    datasource_xfm.inputs.field_template = {'outfiles': xfm_pattern}
+    datasource_xfm.inputs.template_args = {'outfiles': [[]]}
 
     datasource_atlas = Node(
         interface=DataGrabber(
+            infields=[],
+            outfields=['outfiles'],
             sort_filelist=True
         ),
         name='datasource_atlas'
     )
     datasource_atlas.inputs.base_directory = os.path.abspath(atlas_dir)
-    datasource_atlas.inputs.template = atlas_pattern
+    datasource_atlas.inputs.template = '*'
+    datasource_atlas.inputs.field_template = {'outfiles': atlas_pattern}
+    datasource_atlas.inputs.template_args = {'outfiles': [[]]}
 
     resample = MapNode(
         interface=Resample(
@@ -179,7 +191,7 @@ if __name__ == "__main__":
         plugin='MultiProc',
         plugin_args={
             'n_procs': int(
-                os.environ["NCPUS"] if "NCPUS" in os.environ else os.cpu_count
+                os.environ["NCPUS"] if "NCPUS" in os.environ else os.cpu_count()
             )
         }
     )
