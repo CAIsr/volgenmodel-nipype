@@ -267,6 +267,43 @@ NODE_MEMORY_MB = {
     'pik': 200,               # Picture generation: ~150 MB peak
 }
 
+# Nodes that are lightweight and can run without submitting to scheduler
+# These run on the submit node or within a parent job
+LIGHTWEIGHT_NODES = [
+    'datasource', 'datasink', 'select_first', 'merge_', 'rename',
+    'nii_to_mnc', 'identity', 'write_conf', 'calc_threshold', 'calc_initial',
+    'preprocess_volcentre', 'preprocess_threshold_blur', 'preprocess_normalise',
+    'preprocess_volpad', 'preprocess_voliso', 'preprocess_pik', 'preprocess_iso',
+    'combined_preprocess',
+]
+
+
+def mark_nodes_run_locally(workflow, patterns=None):
+    """
+    Mark nodes matching certain patterns to run without submitting as separate jobs.
+    This reduces SLURM/PBS job count by running lightweight nodes on the submit node.
+    
+    Args:
+        workflow: Nipype workflow object
+        patterns: List of node name patterns to mark. If None, uses LIGHTWEIGHT_NODES.
+    """
+    if patterns is None:
+        patterns = LIGHTWEIGHT_NODES
+    
+    nodes_marked = 0
+    
+    for node in workflow._get_all_nodes():
+        node_name = node.name.lower()
+        
+        for pattern in patterns:
+            if pattern.lower() in node_name:
+                node.run_without_submitting = True
+                nodes_marked += 1
+                break
+    
+    print(f"+++ Marked {nodes_marked} lightweight nodes to run locally (no separate jobs)")
+    return nodes_marked
+
 
 def set_node_memory_requirements(workflow, scale=1.0):
     """
@@ -533,6 +570,106 @@ def identity_file(input_file):
     shutil.copyfile(input_file, output_file)
 
     return os.path.abspath(output_file)
+
+
+def _combined_preprocessing(input_file, normalise, model_norm_thresh, pad, iso, check):
+    """
+    Combined preprocessing function that performs multiple lightweight steps
+    in a single job to reduce SLURM job count.
+    
+    This combines: NIfTI conversion, volcentre, norm, volpad, voliso, and pik
+    into a single function node.
+    """
+    import os
+    import subprocess
+    import tempfile
+    
+    def run_cmd(cmd, desc=""):
+        """Run a command and check for errors."""
+        print(f"+++ {desc}: {' '.join(cmd) if isinstance(cmd, list) else cmd}")
+        result = subprocess.run(cmd if isinstance(cmd, list) else cmd, 
+                                shell=isinstance(cmd, str),
+                                capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"{desc} failed: {result.stderr}")
+        return result.stdout
+    
+    def get_step_sizes(mincfile):
+        xstep = float(run_cmd(f'mincinfo -attvalue xspace:step {mincfile}').split()[0])
+        ystep = float(run_cmd(f'mincinfo -attvalue yspace:step {mincfile}').split()[0])
+        zstep = float(run_cmd(f'mincinfo -attvalue zspace:step {mincfile}').split()[0])
+        return (xstep, ystep, zstep)
+    
+    current_file = input_file
+    basename = os.path.basename(input_file)
+    
+    # Step 1: Convert NIfTI to MINC if needed
+    lower_file = input_file.lower()
+    if lower_file.endswith('.nii.gz') or lower_file.endswith('.nii'):
+        if lower_file.endswith('.nii.gz'):
+            output_file = basename[:-7] + '.mnc'
+        else:
+            output_file = basename[:-4] + '.mnc'
+        output_path = os.path.abspath(output_file)
+        run_cmd(['nii2mnc', '-float', '-clobber', input_file, output_path], "NIfTI to MINC")
+        current_file = output_path
+        basename = os.path.basename(current_file)
+    
+    # Step 2: Volcentre
+    volcentre_out = os.path.abspath(basename.replace('.mnc', '_volcentre.mnc'))
+    run_cmd(['volcentre', '-clobber', '-zero_dircos', current_file, volcentre_out], "Volcentre")
+    current_file = volcentre_out
+    
+    # Step 3: Normalize (if requested)
+    if normalise:
+        step_x, step_y, step_z = get_step_sizes(current_file)
+        threshold_blur = abs(step_x + step_y + step_z)
+        
+        norm_out = os.path.abspath(basename.replace('.mnc', '_norm.mnc'))
+        run_cmd([
+            'mincnorm', '-clobber', 
+            '-cutoff', str(model_norm_thresh),
+            '-threshold', '-threshold_perc', str(model_norm_thresh),
+            '-threshold_blur', str(threshold_blur),
+            current_file, norm_out
+        ], "Normalize")
+        current_file = norm_out
+    
+    # Step 4: Volpad (if requested)
+    if pad > 0:
+        volpad_out = os.path.abspath(basename.replace('.mnc', '_volpad.mnc'))
+        run_cmd([
+            'volpad', '-clobber',
+            '-distance', str(pad),
+            '-smooth', '-smooth_distance', '5',
+            current_file, volpad_out
+        ], "Volpad")
+        current_file = volpad_out
+    
+    # Step 5: Voliso (if requested)
+    if iso:
+        voliso_out = os.path.abspath(basename.replace('.mnc', '_voliso.mnc'))
+        run_cmd(['voliso', '-clobber', '-avgstep', current_file, voliso_out], "Voliso")
+        current_file = voliso_out
+    
+    # Step 6: Pik check image (if requested)
+    pik_output = None
+    if check:
+        pik_out = os.path.abspath(basename.replace('.mnc', '_check.jpg'))
+        run_cmd([
+            'mincpik', '-clobber',
+            '-triplanar', '-sagittal_offset', '10',
+            current_file, pik_out
+        ], "Pik check")
+        pik_output = pik_out
+    
+    return current_file, pik_output
+
+
+combined_preprocessing = utils.Function(
+                            input_names=['input_file', 'normalise', 'model_norm_thresh', 'pad', 'iso', 'check'],
+                            output_names=['output_file', 'pik_output'],
+                            function=_combined_preprocessing)
 
 
 def _is_nifti_file(input_file):
@@ -829,136 +966,203 @@ def make_workflow(args, opt, conf):
     #workflow.connect(datasource, 'outfiles', renameFiles, 'in_file')  
     # </editor-fold>
 
-    # <editor-fold desc="convert NIfTI to MINC if needed">
-    # Check if input files might be NIfTI format and convert them to MINC
-    # This handles .nii and .nii.gz files automatically
-    nii_to_mnc_converter = pe.MapNode(
-                    interface=deepcopy(convert_nii_to_mnc),
-                    name='nii_to_mnc_converter',
-                    iterfield=['input_file'])
-    
-    workflow.connect(datasource, 'outfiles', nii_to_mnc_converter, 'input_file')
-    # </editor-fold>
-
-    # <editor-fold desc="do pre-processing nad normalise">
-    preprocess_volcentre = pe.MapNode(
-                    interface=Volcentre(zero_dircos=True),
-                    name='preprocess_volcentre',
-                    iterfield=['input_file'])
-
-    #workflow.connect(renameFiles, 'out_file', preprocess_volcentre, 'input_file')
-    workflow.connect(nii_to_mnc_converter, 'output_file', preprocess_volcentre, 'input_file')
-
-    if opt['normalise']:
-        preprocess_threshold_blur = pe.MapNode(
-                                        interface=deepcopy(calc_threshold_blur_preprocess), # Beware! Need deepcopy since calc_threshold_blur_preprocess is not a constructor!
-                                        name='preprocess_threshold_blur',
-                                        iterfield=['input_file'])
-
-        workflow.connect(preprocess_volcentre, 'output_file', preprocess_threshold_blur, 'input_file')
-
-        preprocess_normalise = pe.MapNode(
-                                    interface=Norm(
-                                                cutoff=opt['model_norm_thresh'],
-                                                threshold=True,
-                                                threshold_perc=opt['model_norm_thresh']),
-                                                # output_file=nrmfile),
-                                    name='preprocess_normalise',
-                                    iterfield=['input_file', 'threshold_blur'])
-
-        workflow.connect(preprocess_threshold_blur, 'threshold_blur', preprocess_normalise, 'threshold_blur')
-
-        # do_cmd('mv -f %s %s' % (nrmfile, resfiles[f],))
-    else:
-        preprocess_normalise_id = utils.Function(
-                                            input_names=['input_file'],
-                                            output_names=['output_file'],
-                                            function=identity_file,
-                                            )
-
-        preprocess_normalise = pe.MapNode(
-                                    interface=preprocess_normalise_id,
-                                    name='preprocess_normalise',
-                                    iterfield=['input_file'])
-
-    workflow.connect(preprocess_volcentre, 'output_file', preprocess_normalise, 'input_file')
-    # </editor-fold>
-
-    # <editor-fold desc="extend/pad">
-    if opt['pad'] > 0:
-        #smoothPadValue = 2
-        preprocess_volpad = pe.MapNode(
-                                interface=Volpad(
-                                            distance=opt['pad'],
-                                            smooth=True,
-                                            smooth_distance=5), 
-                                            # output_file=fitfiles[f]),
-                                name='preprocess_volpad',
-                                iterfield=['input_file'])
-    else:
-        preprocess_volpad_id = utils.Function(
-                                            input_names=['input_file'],
-                                            output_names=['output_file'],
-                                            function=identity_file,
-                                            )
-
-        preprocess_volpad = pe.MapNode(
-                                    interface=preprocess_volpad_id,
-                                    name='preprocess_volpad',
-                                    iterfield=['input_file'])
-        if args.run == 'PBSGraph':
-            preprocess_volpad.plugin_args = {'qsub_args': '-A UQ-CAI -l nodes=1:ppn=10,mem=10gb,vmem=10gb,walltime=04:10:00',
-                                          'overwrite': True}
-        if args.run == 'SLURMGraph':
-            preprocess_volpad.plugin_args = {'sbatch_args': '--time=04:10:00 --mem=10G --cpus-per-task=10',
-                                          'overwrite': True}
-
-    workflow.connect(preprocess_normalise, 'output_file', preprocess_volpad, 'input_file')
-    # </editor-fold>
-
-    # <editor-fold desc="isotropic resampling">
-    if opt['iso']:
-        preprocess_voliso = pe.MapNode(
-                                    interface=Voliso(avgstep=True), # output_file=isofile),
-                                    name='preprocess_voliso',
-                                    iterfield=['input_file'])
-    else:
-        preprocess_voliso_id = utils.Function(
-                                            input_names=['input_file'],
-                                            output_names=['output_file'],
-                                            function=identity_file,
-                                            )
-
-        preprocess_voliso = pe.MapNode(
-                                    interface=preprocess_voliso_id,
-                                    name='preprocess_iso',
-                                    iterfield=['input_file'])
-
-    workflow.connect(preprocess_volpad, 'output_file', preprocess_voliso, 'input_file')
-    # </editor-fold>
-
-    # <editor-fold desc="checkfile">
-    if opt['check']:
-        preprocess_pik = pe.MapNode(
-                                interface=Pik(
-                                            triplanar=True,
-                                            sagittal_offset=10), # output_file=chkfile),
-                                name='preprocess_pik',
-                                iterfield=['input_file'])
-    else:
-        preprocess_pik_id = utils.Function(
+    # <editor-fold desc="Combined preprocessing mode to reduce SLURM jobs">
+    # When combine_jobs is True, we use a single Function node that performs
+    # all preprocessing steps in one SLURM job instead of many separate jobs.
+    if opt.get('combine_jobs', False):
+        print("+++ Using COMBINED preprocessing mode (reduces SLURM job count)")
+        
+        combined_preprocess = pe.MapNode(
+                        interface=deepcopy(combined_preprocessing),
+                        name='combined_preprocess',
+                        iterfield=['input_file'])
+        
+        # Set constant inputs
+        combined_preprocess.inputs.normalise = opt['normalise']
+        combined_preprocess.inputs.model_norm_thresh = opt['model_norm_thresh']
+        combined_preprocess.inputs.pad = opt['pad']
+        combined_preprocess.inputs.iso = opt['iso']
+        combined_preprocess.inputs.check = opt['check']
+        
+        workflow.connect(datasource, 'outfiles', combined_preprocess, 'input_file')
+        
+        # Create passthrough nodes that just return the combined output
+        # This maintains compatibility with the rest of the workflow
+        preprocess_voliso_passthrough = pe.MapNode(
+                                interface=utils.Function(
                                     input_names=['input_file'],
                                     output_names=['output_file'],
-                                    function=identity_file,
-                                    )
-
-        preprocess_pik = pe.MapNode(
-                                interface=preprocess_pik_id,
-                                name='preprocess_pik',
+                                    function=identity_file),
+                                name='preprocess_voliso',
                                 iterfield=['input_file'])
+        
+        workflow.connect(combined_preprocess, 'output_file', preprocess_voliso_passthrough, 'input_file')
+        
+        # For the normalise output (used by resample later), we need to track intermediate
+        # Since combined mode doesn't preserve intermediates, use the final output
+        preprocess_normalise_passthrough = pe.MapNode(
+                                interface=utils.Function(
+                                    input_names=['input_file'],
+                                    output_names=['output_file'],
+                                    function=identity_file),
+                                name='preprocess_normalise',
+                                iterfield=['input_file'])
+        
+        workflow.connect(combined_preprocess, 'output_file', preprocess_normalise_passthrough, 'input_file')
+        
+        # For volpad output (used by initial model)
+        preprocess_volpad_passthrough = pe.MapNode(
+                                interface=utils.Function(
+                                    input_names=['input_file'],
+                                    output_names=['output_file'],
+                                    function=identity_file),
+                                name='preprocess_volpad',
+                                iterfield=['input_file'])
+        
+        workflow.connect(combined_preprocess, 'output_file', preprocess_volpad_passthrough, 'input_file')
+        
+        # Assign to the standard variable names for downstream compatibility
+        preprocess_voliso = preprocess_voliso_passthrough
+        preprocess_normalise = preprocess_normalise_passthrough
+        preprocess_volpad = preprocess_volpad_passthrough
+        
+        # Skip the separate preprocessing nodes - they're all combined above
+        # Jump directly to initial model setup
+        
+    else:
+        # Standard mode: use individual nodes for each preprocessing step
+        # </editor-fold>
 
-    workflow.connect(preprocess_volpad, 'output_file', preprocess_pik, 'input_file')
-    # </editor-fold>
+        # <editor-fold desc="convert NIfTI to MINC if needed">
+        # Check if input files might be NIfTI format and convert them to MINC
+        # This handles .nii and .nii.gz files automatically
+        nii_to_mnc_converter = pe.MapNode(
+                        interface=deepcopy(convert_nii_to_mnc),
+                        name='nii_to_mnc_converter',
+                        iterfield=['input_file'])
+        
+        workflow.connect(datasource, 'outfiles', nii_to_mnc_converter, 'input_file')
+        # </editor-fold>
+
+        # <editor-fold desc="do pre-processing nad normalise">
+        preprocess_volcentre = pe.MapNode(
+                        interface=Volcentre(zero_dircos=True),
+                        name='preprocess_volcentre',
+                        iterfield=['input_file'])
+
+        #workflow.connect(renameFiles, 'out_file', preprocess_volcentre, 'input_file')
+        workflow.connect(nii_to_mnc_converter, 'output_file', preprocess_volcentre, 'input_file')
+
+        if opt['normalise']:
+            preprocess_threshold_blur = pe.MapNode(
+                                            interface=deepcopy(calc_threshold_blur_preprocess), # Beware! Need deepcopy since calc_threshold_blur_preprocess is not a constructor!
+                                            name='preprocess_threshold_blur',
+                                            iterfield=['input_file'])
+
+            workflow.connect(preprocess_volcentre, 'output_file', preprocess_threshold_blur, 'input_file')
+
+            preprocess_normalise = pe.MapNode(
+                                        interface=Norm(
+                                                    cutoff=opt['model_norm_thresh'],
+                                                    threshold=True,
+                                                    threshold_perc=opt['model_norm_thresh']),
+                                                    # output_file=nrmfile),
+                                        name='preprocess_normalise',
+                                        iterfield=['input_file', 'threshold_blur'])
+
+            workflow.connect(preprocess_threshold_blur, 'threshold_blur', preprocess_normalise, 'threshold_blur')
+
+            # do_cmd('mv -f %s %s' % (nrmfile, resfiles[f],))
+        else:
+            preprocess_normalise_id = utils.Function(
+                                                input_names=['input_file'],
+                                                output_names=['output_file'],
+                                                function=identity_file,
+                                                )
+
+            preprocess_normalise = pe.MapNode(
+                                        interface=preprocess_normalise_id,
+                                        name='preprocess_normalise',
+                                        iterfield=['input_file'])
+
+        workflow.connect(preprocess_volcentre, 'output_file', preprocess_normalise, 'input_file')
+        # </editor-fold>
+
+        # <editor-fold desc="extend/pad">
+        if opt['pad'] > 0:
+            #smoothPadValue = 2
+            preprocess_volpad = pe.MapNode(
+                                    interface=Volpad(
+                                                distance=opt['pad'],
+                                                smooth=True,
+                                                smooth_distance=5), 
+                                                # output_file=fitfiles[f]),
+                                    name='preprocess_volpad',
+                                    iterfield=['input_file'])
+        else:
+            preprocess_volpad_id = utils.Function(
+                                                input_names=['input_file'],
+                                                output_names=['output_file'],
+                                                function=identity_file,
+                                                )
+
+            preprocess_volpad = pe.MapNode(
+                                        interface=preprocess_volpad_id,
+                                        name='preprocess_volpad',
+                                        iterfield=['input_file'])
+            if args.run == 'PBSGraph':
+                preprocess_volpad.plugin_args = {'qsub_args': '-A UQ-CAI -l nodes=1:ppn=10,mem=10gb,vmem=10gb,walltime=04:10:00',
+                                              'overwrite': True}
+            if args.run == 'SLURMGraph':
+                preprocess_volpad.plugin_args = {'sbatch_args': '--time=04:10:00 --mem=10G --cpus-per-task=10',
+                                              'overwrite': True}
+
+        workflow.connect(preprocess_normalise, 'output_file', preprocess_volpad, 'input_file')
+        # </editor-fold>
+
+        # <editor-fold desc="isotropic resampling">
+        if opt['iso']:
+            preprocess_voliso = pe.MapNode(
+                                        interface=Voliso(avgstep=True), # output_file=isofile),
+                                        name='preprocess_voliso',
+                                        iterfield=['input_file'])
+        else:
+            preprocess_voliso_id = utils.Function(
+                                                input_names=['input_file'],
+                                                output_names=['output_file'],
+                                                function=identity_file,
+                                                )
+
+            preprocess_voliso = pe.MapNode(
+                                        interface=preprocess_voliso_id,
+                                        name='preprocess_iso',
+                                        iterfield=['input_file'])
+
+        workflow.connect(preprocess_volpad, 'output_file', preprocess_voliso, 'input_file')
+        # </editor-fold>
+
+        # <editor-fold desc="checkfile">
+        if opt['check']:
+            preprocess_pik = pe.MapNode(
+                                    interface=Pik(
+                                                triplanar=True,
+                                                sagittal_offset=10), # output_file=chkfile),
+                                    name='preprocess_pik',
+                                    iterfield=['input_file'])
+        else:
+            preprocess_pik_id = utils.Function(
+                                        input_names=['input_file'],
+                                        output_names=['output_file'],
+                                        function=identity_file,
+                                        )
+
+            preprocess_pik = pe.MapNode(
+                                    interface=preprocess_pik_id,
+                                    name='preprocess_pik',
+                                    iterfield=['input_file'])
+
+        workflow.connect(preprocess_volpad, 'output_file', preprocess_pik, 'input_file')
+        # </editor-fold>
 
     # <editor-fold desc="setup the initial model">
     if opt['init_model'] is not None:
@@ -1473,7 +1677,8 @@ if __name__ == '__main__':
     parser.add_argument('--iso', type=bool, default=1, choices=[0, 1],
                         help='resample image to be isometric')
     parser.add_argument('--fit_stages', type=str, default='lin,0,1,2,3,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11',
-                        help='fit stages to be run')
+                        help='fit stages to be run. Use presets: "fast" (lin,0,2,4,6,8,10), '
+                             '"medium" (lin,0,1,2,3,4,5,6,7,8,9,10,11), or custom comma-separated values')
     parser.add_argument('--output_nifti', type=bool, default=1, choices=[0, 1],
                         help='Convert final model and stdev outputs to NIfTI format (post-processing)')
 
@@ -1495,6 +1700,13 @@ if __name__ == '__main__':
                              'Increase for larger input data (e.g., 2.0 for high-res scans)')
     parser.add_argument('--profile', action='store_true', default=False,
                         help='Enable resource monitoring to profile memory/CPU usage per node')
+    parser.add_argument('--combine_jobs', action='store_true', default=False,
+                        help='Combine lightweight preprocessing steps into single SLURM jobs. '
+                             'Reduces total job count significantly for SLURMGraph execution. '
+                             'Preprocessing (volcentre, norm, volpad, voliso) runs locally within jobs.')
+    parser.add_argument('--run_preproc_locally', action='store_true', default=False,
+                        help='Mark all preprocessing nodes to run without submitting separate SLURM jobs. '
+                             'These will execute on the submit node or within a parent SLURM job.')
 
     cli_args, unparsed = parser.parse_known_args()
 
@@ -1502,6 +1714,18 @@ if __name__ == '__main__':
         parser.print_help(sys.stderr)
         sys.exit(1)
     args = parser.parse_args()
+
+    # Handle fit_stages presets to reduce job count
+    FIT_STAGES_PRESETS = {
+        'fast': 'lin,0,2,4,6,8,10',           # 7 stages, ~65% fewer jobs
+        'medium': 'lin,0,1,2,3,4,5,6,7,8,9,10,11',  # 13 stages, ~35% fewer jobs
+        'full': 'lin,0,1,2,3,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11',  # default, 20 stages
+    }
+    
+    fit_stages_input = cli_args.fit_stages.lower()
+    if fit_stages_input in FIT_STAGES_PRESETS:
+        cli_args.fit_stages = FIT_STAGES_PRESETS[fit_stages_input]
+        print(f"+++ Using fit_stages preset '{fit_stages_input}': {cli_args.fit_stages}")
 
     options = dict()
     options['symmetric'] = cli_args.symmetric
@@ -1519,6 +1743,8 @@ if __name__ == '__main__':
     options['output_model'] = 'model.mnc'
     options['output_stdev'] = 'stdev.mnc'
     options['output_nifti'] = cli_args.output_nifti
+    options['combine_jobs'] = cli_args.combine_jobs
+    options['run_preproc_locally'] = cli_args.run_preproc_locally
     # opt['workdir'] = '/scratch/volgenmodel-fast-example/work'
     options['verbose'] = 1
     options['clobber'] = 1
@@ -1548,6 +1774,11 @@ if __name__ == '__main__':
 
     # Set per-node memory requirements based on profiling data
     set_node_memory_requirements(wf, scale=cli_args.memory_scale)
+    
+    # Mark lightweight nodes to run locally (not as separate SLURM jobs)
+    if cli_args.run_preproc_locally or cli_args.run == 'SLURMGraph':
+        # Always mark some nodes as local for SLURM to reduce job count
+        mark_nodes_run_locally(wf)
 
     os.makedirs(os.path.abspath(args.work_dir), exist_ok=True)
     os.makedirs(os.path.abspath(args.output_dir), exist_ok=True)
