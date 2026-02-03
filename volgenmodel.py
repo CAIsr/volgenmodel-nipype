@@ -375,28 +375,27 @@ def analyze_proc_files(search_dir='.'):
     # Sort by peak memory (highest first)
     results.sort(key=lambda x: x['peak_rss_gb'], reverse=True)
     
-    print("\n" + "=" * 90)
-    print("PROCESS RESOURCE USAGE SUMMARY (from .proc-* files, sorted by peak RSS)")
-    print("=" * 90)
-    print(f"{'File':<25} {'PID':<12} {'Peak RSS (GB)':>14} {'Peak VMS (GB)':>14} {'Elapsed (s)':>12}")
-    print("-" * 90)
+    print("\n" + "=" * 60)
+    print("RESOURCE USAGE (sorted by peak RSS)")
+    print("=" * 60)
+    print(f"{'PID':<10} {'RSS MB':>8} {'VMS MB':>8} {'CPU%':>6} {'Time':>8}")
+    print("-" * 60)
     
     overall_peak_rss = 0
     overall_peak_vms = 0
     
     for r in results:
-        print(f"{r['file']:<25} {r['pid']:<12} {r['peak_rss_gb']:>14.2f} {r['peak_vms_gb']:>14.2f} {r['elapsed_sec']:>12.1f}")
+        rss_mb = r['peak_rss_gb'] * 1024
+        vms_mb = r['peak_vms_gb'] * 1024
+        elapsed = f"{r['elapsed_sec']:.0f}s"
+        print(f"{r['pid']:<10} {rss_mb:>8.0f} {vms_mb:>8.0f} {r['max_cpu_percent']:>6.0f} {elapsed:>8}")
         overall_peak_rss = max(overall_peak_rss, r['peak_rss_gb'])
         overall_peak_vms = max(overall_peak_vms, r['peak_vms_gb'])
     
-    print("-" * 90)
-    print(f"{'OVERALL PEAK RSS:':<25} {'':<12} {overall_peak_rss:>14.2f} GB")
-    print(f"{'OVERALL PEAK VMS:':<25} {'':<12} {overall_peak_vms:>14.2f} GB")
-    print("=" * 90)
-    
-    print("\n=== RECOMMENDATIONS ===")
-    print(f"Set --memory_gb to at least {int(overall_peak_rss * 1.2) + 1} GB (peak RSS + 20% headroom)")
-    print("=" * 90 + "\n")
+    print("-" * 60)
+    print(f"{'PEAK:':<10} {overall_peak_rss*1024:>8.0f} {overall_peak_vms*1024:>8.0f}")
+    print("=" * 60)
+    print(f"Recommend --memory_gb >= {int(overall_peak_rss * 1.2) + 1}\n")
     
     return results
 
