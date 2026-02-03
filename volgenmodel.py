@@ -279,6 +279,8 @@ def analyze_proc_files(search_dir='.'):
     Parse Nipype .proc-* files (raw resource monitor logs) and summarize usage.
     These files are created by nipype's resource_monitor during execution.
     
+    Format: timestamp,elapsed/cpu,rss_mb,vms_mb (comma-separated, no header)
+    
     Args:
         search_dir: Directory to search for .proc-* files (default: current directory)
     """
@@ -306,62 +308,50 @@ def analyze_proc_files(search_dir='.'):
     
     for proc_file in proc_files:
         try:
-            # .proc files are tab-separated with header
             with open(proc_file, 'r') as f:
                 lines = f.readlines()
             
-            if len(lines) < 2:
+            if len(lines) < 1:
                 continue
-                
-            # Parse header to find column indices
-            header = lines[0].strip().split('\t')
             
-            # Common column names in .proc files
-            col_map = {col: i for i, col in enumerate(header)}
+            peak_rss_mb = 0
+            peak_vms_mb = 0
+            start_time = None
+            end_time = None
             
-            peak_rss = 0
-            peak_vms = 0
-            max_cpu = 0
-            total_elapsed = 0
-            
-            for line in lines[1:]:
-                fields = line.strip().split('\t')
-                if len(fields) < len(header):
+            for line in lines:
+                # Format: timestamp,elapsed/cpu,rss_mb,vms_mb
+                fields = line.strip().split(',')
+                if len(fields) < 4:
                     continue
                 
-                # Try different possible column names
-                if 'rss_GiB' in col_map:
-                    rss = float(fields[col_map['rss_GiB']])
-                    peak_rss = max(peak_rss, rss)
-                elif 'rss' in col_map:
-                    # rss might be in bytes, convert to GiB
-                    rss = float(fields[col_map['rss']]) / (1024**3)
-                    peak_rss = max(peak_rss, rss)
-                
-                if 'vms_GiB' in col_map:
-                    vms = float(fields[col_map['vms_GiB']])
-                    peak_vms = max(peak_vms, vms)
-                elif 'vms' in col_map:
-                    vms = float(fields[col_map['vms']]) / (1024**3)
-                    peak_vms = max(peak_vms, vms)
-                
-                if 'cpu_percent' in col_map:
-                    cpu = float(fields[col_map['cpu_percent']])
-                    max_cpu = max(max_cpu, cpu)
-                
-                if 'elapsed' in col_map:
-                    total_elapsed = max(total_elapsed, float(fields[col_map['elapsed']]))
+                try:
+                    timestamp = float(fields[0])
+                    rss_mb = float(fields[2])
+                    vms_mb = float(fields[3])
+                    
+                    peak_rss_mb = max(peak_rss_mb, rss_mb)
+                    peak_vms_mb = max(peak_vms_mb, vms_mb)
+                    
+                    if start_time is None:
+                        start_time = timestamp
+                    end_time = timestamp
+                except (ValueError, IndexError):
+                    continue
             
-            # Extract PID from filename (.proc-XXXXX)
-            pid = os.path.basename(proc_file).replace('.proc-', '')
+            # Calculate elapsed time
+            elapsed_sec = (end_time - start_time) if (start_time and end_time) else 0
+            
+            # Extract PID from filename (.proc-PID_time-...)
+            filename = os.path.basename(proc_file)
+            pid = filename.replace('.proc-', '').split('_')[0]
             
             results.append({
-                'file': os.path.basename(proc_file),
+                'file': filename,
                 'pid': pid,
-                'peak_rss_gb': peak_rss,
-                'peak_vms_gb': peak_vms,
-                'max_cpu_percent': max_cpu,
-                'elapsed_sec': total_elapsed,
+                'peak_rss_mb': peak_rss_mb,
+                'peak_vms_mb': peak_vms_mb,
+                'elapsed_sec': elapsed_sec,
             })
             
         except Exception as e:
@@ -373,29 +363,29 @@ def analyze_proc_files(search_dir='.'):
         return []
     
     # Sort by peak memory (highest first)
-    results.sort(key=lambda x: x['peak_rss_gb'], reverse=True)
+    results.sort(key=lambda x: x['peak_rss_mb'], reverse=True)
     
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 50)
     print("RESOURCE USAGE (sorted by peak RSS)")
-    print("=" * 60)
-    print(f"{'PID':<10} {'RSS MB':>8} {'VMS MB':>8} {'CPU%':>6} {'Time':>8}")
-    print("-" * 60)
+    print("=" * 50)
+    print(f"{'PID':<8} {'RSS MB':>10} {'VMS MB':>10} {'Time':>10}")
+    print("-" * 50)
     
-    overall_peak_rss = 0
-    overall_peak_vms = 0
+    overall_peak_rss_mb = 0
+    overall_peak_vms_mb = 0
     
     for r in results:
-        rss_mb = r['peak_rss_gb'] * 1024
-        vms_mb = r['peak_vms_gb'] * 1024
         elapsed = f"{r['elapsed_sec']:.0f}s"
-        print(f"{r['pid']:<10} {rss_mb:>8.0f} {vms_mb:>8.0f} {r['max_cpu_percent']:>6.0f} {elapsed:>8}")
-        overall_peak_rss = max(overall_peak_rss, r['peak_rss_gb'])
-        overall_peak_vms = max(overall_peak_vms, r['peak_vms_gb'])
+        print(f"{r['pid']:<8} {r['peak_rss_mb']:>10.1f} {r['peak_vms_mb']:>10.1f} {elapsed:>10}")
+        overall_peak_rss_mb = max(overall_peak_rss_mb, r['peak_rss_mb'])
+        overall_peak_vms_mb = max(overall_peak_vms_mb, r['peak_vms_mb'])
     
-    print("-" * 60)
-    print(f"{'PEAK:':<10} {overall_peak_rss*1024:>8.0f} {overall_peak_vms*1024:>8.0f}")
-    print("=" * 60)
-    print(f"Recommend --memory_gb >= {int(overall_peak_rss * 1.2) + 1}\n")
+    print("-" * 50)
+    print(f"{'PEAK:':<8} {overall_peak_rss_mb:>10.1f} {overall_peak_vms_mb:>10.1f}")
+    print("=" * 50)
+    
+    recommended_gb = int(overall_peak_rss_mb / 1024 * 1.2) + 1
+    print(f"Recommend --memory_gb >= {recommended_gb}\n")
     
     return results
 
