@@ -328,7 +328,8 @@ def set_node_memory_requirements(workflow, scale=1.0):
         
         if mem_mb is not None:
             # Convert to GB for Nipype
-            node.mem_gb = mem_mb / 1024.0
+            # Use _mem_gb directly as mem_gb is read-only in newer Nipype versions
+            node._mem_gb = mem_mb / 1024.0
             nodes_configured += 1
     
     print(f"+++ Configured memory for {nodes_configured} nodes (scale={scale:.1f}x)")
