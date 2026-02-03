@@ -274,9 +274,137 @@ def get_available_memory_gb(default=80):
     return default
 
 
+def analyze_proc_files(search_dir='.'):
+    """
+    Parse Nipype .proc-* files (raw resource monitor logs) and summarize usage.
+    These files are created by nipype's resource_monitor during execution.
+    
+    Args:
+        search_dir: Directory to search for .proc-* files (default: current directory)
+    """
+    import glob
+    
+    # Find all .proc-* files
+    proc_files = glob.glob(os.path.join(search_dir, '.proc-*'))
+    
+    if not proc_files:
+        # Also check parent directory and work subdirectory
+        for alt_dir in [os.path.dirname(search_dir), os.path.join(search_dir, 'work')]:
+            proc_files = glob.glob(os.path.join(alt_dir, '.proc-*'))
+            if proc_files:
+                break
+    
+    if not proc_files:
+        print(f"\n=== No .proc-* Files Found ===")
+        print(f"Searched in: {search_dir}")
+        print("These files are created by Nipype's resource monitor during workflow execution.")
+        return []
+    
+    print(f"\nFound {len(proc_files)} .proc-* file(s)")
+    
+    results = []
+    
+    for proc_file in proc_files:
+        try:
+            # .proc files are tab-separated with header
+            with open(proc_file, 'r') as f:
+                lines = f.readlines()
+            
+            if len(lines) < 2:
+                continue
+                
+            # Parse header to find column indices
+            header = lines[0].strip().split('\t')
+            
+            # Common column names in .proc files
+            col_map = {col: i for i, col in enumerate(header)}
+            
+            peak_rss = 0
+            peak_vms = 0
+            max_cpu = 0
+            total_elapsed = 0
+            
+            for line in lines[1:]:
+                fields = line.strip().split('\t')
+                if len(fields) < len(header):
+                    continue
+                
+                # Try different possible column names
+                if 'rss_GiB' in col_map:
+                    rss = float(fields[col_map['rss_GiB']])
+                    peak_rss = max(peak_rss, rss)
+                elif 'rss' in col_map:
+                    # rss might be in bytes, convert to GiB
+                    rss = float(fields[col_map['rss']]) / (1024**3)
+                    peak_rss = max(peak_rss, rss)
+                
+                if 'vms_GiB' in col_map:
+                    vms = float(fields[col_map['vms_GiB']])
+                    peak_vms = max(peak_vms, vms)
+                elif 'vms' in col_map:
+                    vms = float(fields[col_map['vms']]) / (1024**3)
+                    peak_vms = max(peak_vms, vms)
+                
+                if 'cpu_percent' in col_map:
+                    cpu = float(fields[col_map['cpu_percent']])
+                    max_cpu = max(max_cpu, cpu)
+                
+                if 'elapsed' in col_map:
+                    total_elapsed = max(total_elapsed, float(fields[col_map['elapsed']]))
+            
+            # Extract PID from filename (.proc-XXXXX)
+            pid = os.path.basename(proc_file).replace('.proc-', '')
+            
+            results.append({
+                'file': os.path.basename(proc_file),
+                'pid': pid,
+                'peak_rss_gb': peak_rss,
+                'peak_vms_gb': peak_vms,
+                'max_cpu_percent': max_cpu,
+                'elapsed_sec': total_elapsed,
+            })
+            
+        except Exception as e:
+            print(f"Warning: Could not parse {proc_file}: {e}")
+            continue
+    
+    if not results:
+        print("\n=== No Valid Data in .proc Files ===")
+        return []
+    
+    # Sort by peak memory (highest first)
+    results.sort(key=lambda x: x['peak_rss_gb'], reverse=True)
+    
+    print("\n" + "=" * 90)
+    print("PROCESS RESOURCE USAGE SUMMARY (from .proc-* files, sorted by peak RSS)")
+    print("=" * 90)
+    print(f"{'File':<25} {'PID':<12} {'Peak RSS (GB)':>14} {'Peak VMS (GB)':>14} {'Elapsed (s)':>12}")
+    print("-" * 90)
+    
+    overall_peak_rss = 0
+    overall_peak_vms = 0
+    
+    for r in results:
+        print(f"{r['file']:<25} {r['pid']:<12} {r['peak_rss_gb']:>14.2f} {r['peak_vms_gb']:>14.2f} {r['elapsed_sec']:>12.1f}")
+        overall_peak_rss = max(overall_peak_rss, r['peak_rss_gb'])
+        overall_peak_vms = max(overall_peak_vms, r['peak_vms_gb'])
+    
+    print("-" * 90)
+    print(f"{'OVERALL PEAK RSS:':<25} {'':<12} {overall_peak_rss:>14.2f} GB")
+    print(f"{'OVERALL PEAK VMS:':<25} {'':<12} {overall_peak_vms:>14.2f} GB")
+    print("=" * 90)
+    
+    print("\n=== RECOMMENDATIONS ===")
+    print(f"Set --memory_gb to at least {int(overall_peak_rss * 1.2) + 1} GB (peak RSS + 20% headroom)")
+    print("=" * 90 + "\n")
+    
+    return results
+
+
 def analyze_resource_reports(work_dir):
     """
     Parse Nipype resource reports and summarize memory usage per node.
+    Also checks for .proc-* files if no report.json files are found.
     Requires resource monitoring to be enabled before workflow execution.
     """
     import glob
@@ -310,10 +438,10 @@ def analyze_resource_reports(work_dir):
                 continue
     
     if not results:
-        print("\n=== No Resource Reports Found ===")
-        print("Make sure --profile was enabled and the workflow completed.")
+        print("\n=== No report.json Files Found ===")
         print(f"Searched in: {work_dir}")
-        return []
+        print("\nFalling back to .proc-* files...")
+        return analyze_proc_files(work_dir)
     
     # Sort by memory usage (highest first)
     results.sort(key=lambda x: x['memory_gb'], reverse=True)
