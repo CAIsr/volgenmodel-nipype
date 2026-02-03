@@ -243,6 +243,62 @@ def get_cgroup_memory_limit_gb():
     return None
 
 
+# Per-node memory requirements in MB, based on profiling data
+# These are peak RSS values observed during a typical run
+# Nodes not listed here use default Nipype memory settings
+NODE_MEMORY_MB = {
+    # High memory nodes (registration/fitting)
+    'nlpfit': 5000,           # Non-linear fitting: ~4.7 GB peak
+    'bigaverage': 2500,       # Averaging: ~2.2 GB peak
+    'resample': 2500,         # Resampling: ~2.2 GB peak
+    'bestlinreg': 1500,       # Linear registration: ~1.5 GB peak
+    'xfmconcat': 1500,        # Transform concatenation: ~1.3 GB peak
+    
+    # Medium memory nodes
+    'volsymm': 1000,          # Symmetry operations: ~800 MB peak
+    'blur': 800,              # Blurring: ~700 MB peak
+    'mincmath': 600,          # Math operations: ~500 MB peak
+    
+    # Low memory nodes (preprocessing)
+    'preprocess': 500,        # General preprocessing: ~400 MB peak
+    'volcentre': 300,         # Volume centering: ~250 MB peak
+    'volpad': 300,            # Volume padding: ~250 MB peak
+    'voliso': 300,            # Isotropic resampling: ~250 MB peak
+    'pik': 200,               # Picture generation: ~150 MB peak
+}
+
+
+def set_node_memory_requirements(workflow, scale=1.0):
+    """
+    Set memory requirements for workflow nodes based on profiling data.
+    
+    Args:
+        workflow: Nipype workflow object
+        scale: Memory scaling factor (default 1.0). Increase for larger datasets.
+               e.g., scale=2.0 doubles all memory allocations
+    """
+    nodes_configured = 0
+    
+    for node in workflow._get_all_nodes():
+        node_name = node.name.lower()
+        
+        # Find matching memory requirement
+        mem_mb = None
+        for pattern, base_mem in NODE_MEMORY_MB.items():
+            if pattern in node_name:
+                mem_mb = int(base_mem * scale)
+                break
+        
+        if mem_mb is not None:
+            # Convert to GB for Nipype
+            node.mem_gb = mem_mb / 1024.0
+            nodes_configured += 1
+    
+    print(f"+++ Configured memory for {nodes_configured} nodes (scale={scale:.1f}x)")
+    if scale != 1.0:
+        print(f"    Memory values scaled by {scale:.1f}x from baseline")
+
+
 def get_available_memory_gb(default=80):
     """
     Get available memory in GB, checking in order:
@@ -1434,6 +1490,9 @@ if __name__ == '__main__':
                         help='SLURM CPUs per task')
     parser.add_argument('--memory_gb', type=int, default=None,
                         help='Memory limit in GB for MultiProc mode (auto-detected from cgroups if not specified)')
+    parser.add_argument('--memory_scale', type=float, default=1.0,
+                        help='Memory scaling factor for per-node allocations (default: 1.0). '
+                             'Increase for larger input data (e.g., 2.0 for high-res scans)')
     parser.add_argument('--profile', action='store_true', default=False,
                         help='Enable resource monitoring to profile memory/CPU usage per node')
 
@@ -1486,6 +1545,9 @@ if __name__ == '__main__':
                      {str('step'): 0.7, str('blur_fwhm'): 0.35, str('iterations'): 5}]      # 11
 
     wf = make_workflow(cli_args, options, configuration)
+
+    # Set per-node memory requirements based on profiling data
+    set_node_memory_requirements(wf, scale=cli_args.memory_scale)
 
     os.makedirs(os.path.abspath(args.work_dir), exist_ok=True)
     os.makedirs(os.path.abspath(args.output_dir), exist_ok=True)

@@ -9,6 +9,12 @@ ml minc
 python3 volgenmodel-nipype/volgenmodel.py --input_dir volgenmodel-fast-example
 ```
 
+## Adjusting memory
+Every nipype node has a default for the memory consumption, but this might not be enough depending on the input data. If you get out of memory errors, adjust the memory scale, e.g. by 2:
+```
+python3 volgenmodel.py --input_dir data/ --work_dir work/ --memory_scale 2.0
+```
+
 ## Use Volgenmodel as a docker container
 this project maintains a docker container with volgenmodel and minc setup and configured: https://github.com/SaibotMagd/volgenmodel-docker
 
