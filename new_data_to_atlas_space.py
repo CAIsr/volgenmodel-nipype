@@ -1,11 +1,46 @@
 #!/usr/bin/env python3
 import os
 import os.path
+import shutil
+import subprocess
 from nipype.interfaces.utility import IdentityInterface, Function
 from nipype.interfaces.io import SelectFiles, DataSink, DataGrabber
 from nipype.pipeline.engine import Workflow, Node, MapNode
 from nipype.interfaces.minc import Resample, BigAverage, VolSymm
 import argparse
+
+
+def check_minc_available():
+    """Check if MINC tools are available on PATH, try to load via 'ml minc' if not."""
+    if shutil.which('mincresample') is not None:
+        return True
+    
+    # Try to load minc module
+    print("MINC tools not found on PATH, attempting to load via 'ml minc'...")
+    try:
+        result = subprocess.run(
+            ['bash', '-c', 'source /etc/profile.d/modules.sh 2>/dev/null || true; ml minc && echo $PATH'],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        # Update PATH with the module's additions
+        new_path = result.stdout.strip()
+        if new_path:
+            os.environ['PATH'] = new_path
+        
+        if shutil.which('mincresample') is not None:
+            print("Successfully loaded MINC module.")
+            return True
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to load MINC module: {e}")
+    except FileNotFoundError:
+        print("Module system not available.")
+    
+    raise RuntimeError(
+        "MINC tools are not available. Please ensure MINC is installed and on your PATH, "
+        "or that the 'minc' module can be loaded via 'ml minc'."
+    )
 
 
 def create_workflow(
@@ -164,6 +199,9 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+
+    # Check MINC availability before running workflow
+    check_minc_available()
 
     if args.debug:
         from nipype import config
