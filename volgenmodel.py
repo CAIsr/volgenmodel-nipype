@@ -1777,8 +1777,8 @@ if __name__ == '__main__':
     set_node_memory_requirements(wf, scale=cli_args.memory_scale)
     
     # Mark lightweight nodes to run locally (not as separate SLURM jobs)
-    if cli_args.run_preproc_locally or cli_args.run == 'SLURMGraph':
-        # Always mark some nodes as local for SLURM to reduce job count
+    # Only do this if explicitly requested - for SLURMGraph, all jobs should be submitted
+    if cli_args.run_preproc_locally:
         mark_nodes_run_locally(wf)
 
     os.makedirs(os.path.abspath(args.work_dir), exist_ok=True)

@@ -24,6 +24,8 @@ python3 volgenmodel.py --run SLURMGraph --combine_jobs --input_dir data/
 ```
 This typically reduces preprocessing from 5-6 jobs per input file to just 1.
 
+additional `--run_preproc_locally` can be added which runs small preprocessing steps on the submit node.
+
 
 ## Use Volgenmodel as a docker container
 this project maintains a docker container with volgenmodel and minc setup and configured: https://github.com/SaibotMagd/volgenmodel-docker
