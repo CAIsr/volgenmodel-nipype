@@ -16,37 +16,14 @@ python3 volgenmodel.py --input_dir data/ --work_dir work/ --memory_scale 2.0
 ```
 
 ## Reducing SLURM job count
-When running with `--run SLURMGraph`, each workflow node becomes a separate SLURM job. This can create hundreds of jobs that all wait in the queue. There are several ways to reduce job count:
+When running with `--run SLURMGraph`, each workflow node becomes a separate SLURM job. This can create hundreds of jobs that all wait in the queue. 
 
-### Option 1: Combined preprocessing (recommended)
 Use `--combine_jobs` to merge all preprocessing steps (NIfTI conversion, volcentre, normalize, volpad, voliso) into a single job per input file:
 ```bash
 python3 volgenmodel.py --run SLURMGraph --combine_jobs --input_dir data/
 ```
 This typically reduces preprocessing from 5-6 jobs per input file to just 1.
 
-### Option 2: Use a faster fit_stages preset
-The default pipeline uses 20 fit stages. Use presets to reduce:
-```bash
-# Fast: 7 stages (~65% fewer jobs, good for testing)
-python3 volgenmodel.py --run SLURMGraph --fit_stages fast --input_dir data/
-
-# Medium: 13 stages (~35% fewer jobs, balanced quality/speed)
-python3 volgenmodel.py --run SLURMGraph --fit_stages medium --input_dir data/
-```
-
-### Option 3: Combine both approaches
-```bash
-python3 volgenmodel.py --run SLURMGraph --combine_jobs --fit_stages medium \
-    --slurm_account myaccount --slurm_partition normal --input_dir data/
-```
-
-### Estimating job count
-With default settings and N input files, you get approximately:
-- Default: ~5-6 preprocessing + ~20 fit stages × (multiple nodes per stage) = many hundreds of jobs
-- `--combine_jobs`: Reduces preprocessing to N jobs
-- `--fit_stages fast`: Reduces fit stages from 20 to 7
-- Combined: Can reduce total jobs by 60-70%
 
 ## Use Volgenmodel as a docker container
 this project maintains a docker container with volgenmodel and minc setup and configured: https://github.com/SaibotMagd/volgenmodel-docker
